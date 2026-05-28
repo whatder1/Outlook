@@ -1,27 +1,38 @@
 Office.onReady();
 
-// === DIAGNOSTIC BUILD v1.0.0.5 ===
-// This build prepends a visible marker "[SIG-FIX v5 RAN]" to every outgoing
-// email body so we can confirm the OnMessageSend handler is actually firing.
-// If you send a test and the recipient sees the marker, the add-in is loaded
-// and running — and the prior versions' regex was the problem. If the marker
-// is missing, the add-in itself is not being invoked (cache / install issue).
+// New Outlook embeds unaccepted text predictions directly in the email body as
+// an HTML widget:
+//
+//   <span class="entityDelimiterBefore">​</span>
+//   <span class="_Entity _EType_suggestedCompletion ...">
+//     <span id="textPredictionParent" class="suggestedCompletion" ...>
+//       ​‌<span id="suggestionText">zabeth</span><span id="textPredictionTabHint">Tab</span>​‌
+//     </span>
+//   </span>
+//   <span class="entityDelimiterAfter">​</span>
+//
+// If the user hits Send without pressing Tab, the entire widget ships with the
+// message. We strip it on send so only the user's actually-typed text remains.
 
-const MARKER = "[SIG-FIX v5 RAN] ";
-
-// Matches the entire entity wrapper that contains the prediction.
+// Matches the entity wrapper that contains the prediction. Non-greedy body with
+// "</span>\s*</span>" terminator — the only place two </span> appear with only
+// whitespace between is the wrapper's closing pair.
 const SUGGESTED_COMPLETION =
   /<span\b[^>]*class="[^"]*_EType_suggestedCompletion[^"]*"[^>]*>[\s\S]*?<\/span>\s*<\/span>/gi;
 
+// Surrounding zero-width delimiter spans Outlook adds before/after the widget.
 const ENTITY_DELIMITER =
   /<span\b[^>]*class="[^"]*entityDelimiter(?:Before|After)[^"]*"[^>]*>[\s\S]*?<\/span>/gi;
 
+// Backstop 1: raw "Eli<invisible>zabeth(Tab)" if the artifact shows up
+// without the HTML wrapper.
 const ZW = "[\\u200B-\\u200D\\uFEFF]";
 const ARTIFACT_PATTERN = new RegExp(
   "Eli" + ZW + "+zabeth(?:(?:\\s|<[^>]+>|&nbsp;|&#160;)*Tab\\b)?",
   "g"
 );
 
+// Backstop 2: plain "Elizabeth" right after a sign-off.
 const SIGN_OFFS =
   "Best(?:\\s+regards)?|Thanks(?:\\s+again)?|Thank\\s+you|Regards|" +
   "Kind\\s+regards|Sincerely|Cheers|Warmly|Take\\s+care|Talk\\s+soon|" +
@@ -47,7 +58,6 @@ function onMessageSendHandler(event) {
         const body = getResult.value || "";
         let fixed = body;
 
-        // Strip the prediction widget if present.
         fixed = fixed.replace(SUGGESTED_COMPLETION, "");
         fixed = fixed.replace(ENTITY_DELIMITER, "");
         ARTIFACT_PATTERN.lastIndex = 0;
@@ -55,20 +65,9 @@ function onMessageSendHandler(event) {
         SIGNOFF_PATTERN.lastIndex = 0;
         fixed = fixed.replace(SIGNOFF_PATTERN, "$1$2Eli");
 
-        // Always prepend a visible marker so we know the handler ran.
-        // Inject at the very top of the body so it's the first thing
-        // recipients see.
-        const bodyOpen = fixed.search(/<body\b[^>]*>/i);
-        if (bodyOpen >= 0) {
-          const tagEnd = fixed.indexOf(">", bodyOpen) + 1;
-          fixed =
-            fixed.slice(0, tagEnd) +
-            "<div style='color:red;font-weight:bold'>" +
-            MARKER +
-            "</div>" +
-            fixed.slice(tagEnd);
-        } else {
-          fixed = MARKER + fixed;
+        if (fixed === body) {
+          event.completed({ allowEvent: true });
+          return;
         }
 
         item.body.setAsync(
