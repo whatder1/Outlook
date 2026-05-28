@@ -1,19 +1,30 @@
 Office.onReady();
 
-// Sign-off words. Match "Elizabeth" only when it appears shortly after one of
-// these, so we don't rename an actual person named Elizabeth that you're emailing.
+// Zero-width / invisible separator characters that New Outlook's text prediction
+// inserts between the user-typed prefix ("Eli") and the suggested suffix
+// ("zabeth"). Includes ZWSP, ZWNJ, ZWJ, and BOM.
+const ZW = "[\\u200B-\\u200D\\uFEFF]";
+
+// Pattern 1 — the unambiguous autocomplete artifact: "Eli" + one-or-more
+// invisible chars + "zabeth". No one types this on purpose, so it's always
+// safe to collapse it back to "Eli".
+// Also strip a trailing "Tab" token if the prediction overlay's keyboard hint
+// somehow leaked into the body (e.g., via copy-paste from the compose window).
+const ARTIFACT_PATTERN = new RegExp(
+  "Eli" + ZW + "+zabeth(?:(?:\\s|<[^>]+>|&nbsp;|&#160;)*Tab\\b)?",
+  "g"
+);
+
+// Pattern 2 — plain "Elizabeth" right after a sign-off, as a backstop in case
+// the prediction lands without invisible separators in some Outlook version.
 const SIGN_OFFS =
   "Best(?:\\s+regards)?|Thanks(?:\\s+again)?|Thank\\s+you|Regards|" +
-  "Kind\\s+regards|Sincerely|Cheers|Warmly|Take\\s+care|Talk\\s+soon|All\\s+the\\s+best";
-
-// Group 1 = the sign-off (preserved). Group 2 = everything between the sign-off
-// and "Elizabeth" — any mix of whitespace, HTML tags, nbsp, or entities, up to
-// ~500 chars (non-greedy). This handles nested <div><font><span> wrappers that
-// New Outlook produces between paragraphs.
-const PATTERN = new RegExp(
+  "Kind\\s+regards|Sincerely|Cheers|Warmly|Take\\s+care|Talk\\s+soon|" +
+  "All\\s+the\\s+best";
+const SIGNOFF_PATTERN = new RegExp(
   "(\\b(?:" + SIGN_OFFS + ")[,!.]?)" +
     "((?:\\s|<[^>]+>|&nbsp;|&#160;|&[a-zA-Z]+;){1,500}?)" +
-    "Elizabeth\\b",
+    "Elizabeth(?:(?:\\s|<[^>]+>|&nbsp;|&#160;)*Tab)?\\b",
   "gi"
 );
 
@@ -29,18 +40,17 @@ function onMessageSendHandler(event) {
         }
 
         const body = getResult.value || "";
+        let fixed = body;
 
-        // Cheap pre-check — bail fast if no "Elizabeth" anywhere.
-        if (!/\bElizabeth\b/i.test(body)) {
-          event.completed({ allowEvent: true });
-          return;
-        }
+        // First pass: zap "Eli<invisible>zabeth" artifacts anywhere.
+        ARTIFACT_PATTERN.lastIndex = 0;
+        fixed = fixed.replace(ARTIFACT_PATTERN, "Eli");
 
-        PATTERN.lastIndex = 0;
-        const fixed = body.replace(PATTERN, "$1$2Eli");
+        // Second pass: clean plain "Elizabeth" near a sign-off (backstop).
+        SIGNOFF_PATTERN.lastIndex = 0;
+        fixed = fixed.replace(SIGNOFF_PATTERN, "$1$2Eli");
 
         if (fixed === body) {
-          // "Elizabeth" appeared but not after a sign-off — leave it alone.
           event.completed({ allowEvent: true });
           return;
         }
@@ -49,7 +59,6 @@ function onMessageSendHandler(event) {
           fixed,
           { coercionType: Office.CoercionType.Html },
           function () {
-            // Whether setAsync succeeded or not, allow the send through.
             event.completed({ allowEvent: true });
           }
         );
