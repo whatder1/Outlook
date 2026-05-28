@@ -1,22 +1,38 @@
 Office.onReady();
 
-// Zero-width / invisible separator characters that New Outlook's text prediction
-// inserts between the user-typed prefix ("Eli") and the suggested suffix
-// ("zabeth"). Includes ZWSP, ZWNJ, ZWJ, and BOM.
-const ZW = "[\\u200B-\\u200D\\uFEFF]";
+// New Outlook embeds unaccepted text predictions directly in the email body as
+// an HTML widget:
+//
+//   <span class="entityDelimiterBefore">​</span>
+//   <span class="_Entity _EType_suggestedCompletion ...">
+//     <span id="textPredictionParent" class="suggestedCompletion" ...>
+//       ​‌<span id="suggestionText">zabeth</span><span id="textPredictionTabHint">Tab</span>​‌
+//     </span>
+//   </span>
+//   <span class="entityDelimiterAfter">​</span>
+//
+// If the user hits Send without pressing Tab, the entire widget ships with the
+// message. We strip it on send so only the user's actually-typed text remains.
 
-// Pattern 1 — the unambiguous autocomplete artifact: "Eli" + one-or-more
-// invisible chars + "zabeth". No one types this on purpose, so it's always
-// safe to collapse it back to "Eli".
-// Also strip a trailing "Tab" token if the prediction overlay's keyboard hint
-// somehow leaked into the body (e.g., via copy-paste from the compose window).
+// Matches the entity wrapper that contains the prediction. Non-greedy body with
+// "</span>\s*</span>" terminator — the only place two </span> appear with only
+// whitespace between is the wrapper's closing pair.
+const SUGGESTED_COMPLETION =
+  /<span\b[^>]*class="[^"]*_EType_suggestedCompletion[^"]*"[^>]*>[\s\S]*?<\/span>\s*<\/span>/gi;
+
+// Surrounding zero-width delimiter spans Outlook adds before/after the widget.
+const ENTITY_DELIMITER =
+  /<span\b[^>]*class="[^"]*entityDelimiter(?:Before|After)[^"]*"[^>]*>[\s\S]*?<\/span>/gi;
+
+// Backstop 1: a raw "Eli<invisible>zabeth(Tab)" if the artifact shows up
+// without the HTML wrapper (some Outlook builds may differ).
+const ZW = "[\\u200B-\\u200D\\uFEFF]";
 const ARTIFACT_PATTERN = new RegExp(
   "Eli" + ZW + "+zabeth(?:(?:\\s|<[^>]+>|&nbsp;|&#160;)*Tab\\b)?",
   "g"
 );
 
-// Pattern 2 — plain "Elizabeth" right after a sign-off, as a backstop in case
-// the prediction lands without invisible separators in some Outlook version.
+// Backstop 2: plain "Elizabeth" right after a sign-off.
 const SIGN_OFFS =
   "Best(?:\\s+regards)?|Thanks(?:\\s+again)?|Thank\\s+you|Regards|" +
   "Kind\\s+regards|Sincerely|Cheers|Warmly|Take\\s+care|Talk\\s+soon|" +
@@ -42,11 +58,13 @@ function onMessageSendHandler(event) {
         const body = getResult.value || "";
         let fixed = body;
 
-        // First pass: zap "Eli<invisible>zabeth" artifacts anywhere.
+        // Primary fix: rip out the whole prediction widget and its delimiters.
+        fixed = fixed.replace(SUGGESTED_COMPLETION, "");
+        fixed = fixed.replace(ENTITY_DELIMITER, "");
+
+        // Backstops in case the artifact landed in a different shape.
         ARTIFACT_PATTERN.lastIndex = 0;
         fixed = fixed.replace(ARTIFACT_PATTERN, "Eli");
-
-        // Second pass: clean plain "Elizabeth" near a sign-off (backstop).
         SIGNOFF_PATTERN.lastIndex = 0;
         fixed = fixed.replace(SIGNOFF_PATTERN, "$1$2Eli");
 
